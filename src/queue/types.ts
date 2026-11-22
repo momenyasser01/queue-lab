@@ -6,8 +6,7 @@ export type JobId = string
 export type EnqueueOptions = {
   /** Fixed ID such as `probe:{videoId}`; a duplicate enqueue is dropped. */
   idempotencyKey?: string
-  priority?: number
-  /** Not before this time. */
+  /** Not before this time. Jobs are otherwise taken in enqueue order (FIFO). */
   runAt?: Date
   maxAttempts?: number
 }

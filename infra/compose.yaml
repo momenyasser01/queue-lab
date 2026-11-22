@@ -1,19 +1,28 @@
 name: queue-lab
 
+# Values come from the repo-root .env (run through `pnpm infra:up`, which passes
+# --env-file .env). The defaults below match .env.example.
+
 services:
   postgres:
     profiles: [core]
     image: postgres:17
     environment:
-      POSTGRES_USER: queuelab
-      POSTGRES_PASSWORD: queuelab
-      POSTGRES_DB: queuelab
+      # Read only when the pgdata volume is empty (first start).
+      POSTGRES_USER: ${POSTGRES_USER:-queuelab}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-queuelab}
+      POSTGRES_DB: ${POSTGRES_DB:-queuelab}
+      # Client defaults, so `pnpm db:psql` (psql inside the container) needs no flags.
+      PGUSER: ${POSTGRES_USER:-queuelab}
+      PGDATABASE: ${POSTGRES_DB:-queuelab}
     ports:
-      - '5432:5432'
+      - '${POSTGRES_PORT:-5432}:5432'
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U queuelab']
+      # $$ defers expansion to the container's shell, which has the POSTGRES_* vars.
+      test:
+        ['CMD-SHELL', 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
       interval: 5s
       timeout: 3s
       retries: 10
@@ -22,7 +31,7 @@ services:
     profiles: [core]
     image: redis:7
     ports:
-      - '6379:6379'
+      - '${REDIS_PORT:-6379}:6379'
     healthcheck:
       test: ['CMD', 'redis-cli', 'ping']
       interval: 5s

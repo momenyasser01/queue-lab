@@ -1,0 +1,10 @@
+# Config and secrets are passed in at run time, never baked into an image.
+.env
+.env.*
+!.env.example
+
+node_modules
+dist
+coverage
+.git
+bench/results
