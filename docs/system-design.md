@@ -60,7 +60,7 @@ Each worker is its own small server: it takes jobs from the queue and also answe
 | API server           | Fastify, 1 container                         | Receives uploads and saves them to SeaweedFS, creates the `videos` row, queues the first job, answers status requests               | Postgres, the queue, SeaweedFS |
 | Worker               | Node process, 3+ containers                  | Takes jobs, runs ffprobe/ffmpeg, saves outputs, queues the next jobs; serves `/healthz` and `/metrics`                              | The queue, Postgres, SeaweedFS |
 | Reaper               | A timer inside every worker                  | `pg` only: puts jobs whose lease expired back in the queue. Safe to run in every worker at once because it is a single SQL `UPDATE` | Postgres                       |
-| PostgreSQL           | 1 container                                  | App tables (`videos`, `renditions`) plus `queue.jobs` for the `pg` backend                                                          | —                              |
+| PostgreSQL           | 1 container                                  | App tables (`videos`, `renditions`) plus `queue_jobs` for the `pg` backend                                                          | —                              |
 | Redis                | 1 container                                  | BullMQ's data                                                                                                                       | —                              |
 | SeaweedFS            | 1 container                                  | Stores files: original uploads, renditions, thumbnails. It speaks the Amazon S3 API, so the same code would work on S3              | —                              |
 | Load generator       | CLI container, run on demand                 | Runs workload tiers 1–4 and saves each run's results as a JSON file in `bench/results/`                                             | API, the queue                 |
@@ -99,7 +99,7 @@ flowchart LR
 
 ## Database design
 
-Three tables. `videos` and `renditions` hold the app's data and exist in both backends: one row per uploaded video, and one row per converted copy of it. `queue.jobs` is the queue itself and exists only for the `pg` backend. It has no foreign key to `videos`, because the queue should not know anything about the app; in the `bullmq` backend, Redis holds the same information instead.
+Three tables. `videos` and `renditions` hold the app's data and exist in both backends: one row per uploaded video, and one row per converted copy of it. `queue_jobs` is the queue itself and exists only for the `pg` backend. It has no foreign key to `videos`, because the queue should not know anything about the app; in the `bullmq` backend, Redis holds the same information instead. The schema is plain SQL files in `src/db/migrations/`, applied in name order by `pnpm db:migrate`.
 
 ```mermaid
 erDiagram
@@ -132,10 +132,9 @@ erDiagram
   }
   queue_jobs {
     bigint id PK
-    text queue "probe|thumbnail|transcode|noop|sleep"
+    text job_type "probe|thumbnail|transcode|noop|sleep"
     jsonb payload "e.g. videoId + resolution"
-    job_status status "queued|running|completed|dead"
-    smallint priority
+    job_status status "queued|running|dead (completed rows are deleted)"
     smallint attempts
     smallint max_attempts
     timestamptz run_at "not before this time"
@@ -148,31 +147,31 @@ erDiagram
   }
 ```
 
-`queue_jobs` in the diagram is `queue.jobs` in SQL (Mermaid does not allow dots in entity names).
+`job_type` is the kind of job, which BullMQ calls the queue name; it is not the backend (that is `QUEUE_BACKEND`). There is no priority: every job has the same weight, and jobs that are due are taken in `id` order (FIFO). `run_at` covers both delayed jobs and retry backoff.
 
 ### Indexes
 
 ```sql
--- The fetch path: only queued rows are indexed, so the index stays small as completed rows churn
-CREATE INDEX jobs_fetch ON queue.jobs (queue, priority DESC, run_at, id) WHERE status = 'queued';
+-- The fetch path: FIFO by id; only queued rows are indexed, so the index stays small as rows churn
+CREATE INDEX queue_jobs_fetch ON queue_jobs (job_type, id) WHERE status = 'queued';
 -- The reaper path
-CREATE INDEX jobs_lease ON queue.jobs (locked_until) WHERE status = 'running';
-CREATE UNIQUE INDEX jobs_idem ON queue.jobs (idempotency_key) WHERE idempotency_key IS NOT NULL;
+CREATE INDEX queue_jobs_lease ON queue_jobs (locked_until) WHERE status = 'running';
+CREATE UNIQUE INDEX queue_jobs_idem ON queue_jobs (idempotency_key) WHERE idempotency_key IS NOT NULL;
 -- Queue tables churn fast; vacuum them more often than the default (tune and measure)
-ALTER TABLE queue.jobs SET (autovacuum_vacuum_scale_factor = 0.01);
+ALTER TABLE queue_jobs SET (autovacuum_vacuum_scale_factor = 0.01);
 ```
 
 ### Claim (pg)
 
 ```sql
 WITH next AS (
-  SELECT id FROM queue.jobs
-  WHERE queue = $1 AND status = 'queued' AND run_at <= now()
-  ORDER BY priority DESC, run_at, id
+  SELECT id FROM queue_jobs
+  WHERE job_type = $1 AND status = 'queued' AND run_at <= now()
+  ORDER BY id
   FOR UPDATE SKIP LOCKED
   LIMIT $2
 )
-UPDATE queue.jobs j
+UPDATE queue_jobs j
 SET status = 'running', locked_by = $3,
     locked_until = now() + $4 * interval '1 millisecond',
     started_at = now(), attempts = attempts + 1
@@ -180,8 +179,8 @@ FROM next WHERE j.id = next.id
 RETURNING j.*;
 ```
 
-- **Heartbeat:** `UPDATE queue.jobs SET locked_until = now() + … WHERE id = $1 AND locked_by = $2`. Zero rows updated means the lease was lost; abort the job.
-- **Complete:** `DELETE FROM queue.jobs WHERE id = $1 AND locked_by = $2`. The `locked_by` check stops a worker whose lease expired from completing a job another worker now owns.
+- **Heartbeat:** `UPDATE queue_jobs SET locked_until = now() + … WHERE id = $1 AND locked_by = $2`. Zero rows updated means the lease was lost; abort the job.
+- **Complete:** `DELETE FROM queue_jobs WHERE id = $1 AND locked_by = $2`. The `locked_by` check stops a worker whose lease expired from completing a job another worker now owns.
 - **Fail:** set `status` to `dead` if `attempts >= max_attempts`, else back to `queued` with `run_at = now() + backoff`.
 - **Reaper:** the same update for every row `WHERE status = 'running' AND locked_until < now()`.
 - **Wake-up:** enqueue runs `pg_notify('jobs', queue)` in the same transaction (delivered on commit). Workers `LISTEN` on a dedicated connection and fall back to polling, so a missed notification only adds delay.
@@ -223,13 +222,13 @@ stateDiagram-v2
   completed --> [*]
 ```
 
-| pg backend     | BullMQ                              | Notes                                                                                       |
-| -------------- | ----------------------------------- | ------------------------------------------------------------------------------------------- |
-| `queued`       | `waiting`, `delayed`, `prioritized` | `delayed` = `run_at` in the future                                                          |
-| `running`      | `active`                            |                                                                                             |
-| `completed`    | `completed`                         | Removed on completion in both                                                               |
-| `dead`         | `failed` (after the last attempt)   |                                                                                             |
-| reaper requeue | stalled-job check                   | Set BullMQ `lockDuration` and `stalledInterval` to match `LEASE_MS` and the reaper interval |
+| pg backend     | BullMQ                            | Notes                                                                                                                       |
+| -------------- | --------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `queued`       | `waiting`, `delayed`              | `delayed` = `run_at` in the future                                                                                          |
+| `running`      | `active`                          |                                                                                                                             |
+| `completed`    | `completed`                       | Removed on completion in both (BullMQ needs `removeOnComplete: true`, so a finished job's ID can be queued again, as in pg) |
+| `dead`         | `failed` (after the last attempt) |                                                                                                                             |
+| reaper requeue | stalled-job check                 | Set BullMQ `lockDuration` and `stalledInterval` to match `LEASE_MS` and the reaper interval                                 |
 
 The video moves through its own states, driven by job completions:
 
@@ -305,7 +304,7 @@ The recovery time this test measures is at most the lease length plus the reaper
 ```mermaid
 sequenceDiagram
   participant W1 as Worker 1
-  participant PG as queue.jobs
+  participant PG as queue_jobs
   participant R as Reaper (any worker)
   participant W2 as Worker 2
 
@@ -386,7 +385,7 @@ Every metric carries a `backend` label, so one Grafana dashboard with a `$backen
 | `job_recovery_seconds`   | histogram | backend                 | worker                                       | Time from lease expiry or stall to the next claim                                |
 | `lease_lost_total`       | counter   | backend                 | worker                                       | Heartbeats that found the job taken                                              |
 | `transcode_speed_ratio`  | histogram | resolution              | worker                                       | Video duration ÷ encode time                                                     |
-| From exporters           | —         | —                       | postgres-exporter, redis\_exporter, cAdvisor | Connections in use, dead tuples on `queue.jobs`, Redis memory, per-container CPU |
+| From exporters           | —         | —                       | postgres-exporter, redis\_exporter, cAdvisor | Connections in use, dead tuples on `queue_jobs`, Redis memory, per-container CPU |
 
 **Histogram buckets per queue.** A no-op job waits well under a millisecond and a transcode runs for minutes, so one bucket set cannot resolve both. Use fine buckets (sub-millisecond up to a few seconds) for the synthetic queues and coarse ones (seconds up to tens of minutes) for `transcode`.
 
@@ -401,7 +400,7 @@ The core of the suite is one contract suite run against both backends (`describe
 | Layer                | Tooling                                                            | What it proves                                                                                                                                                                      | When it runs            |
 | -------------------- | ------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
 | Unit                 | Vitest                                                             | Handlers with fake storage and media, backoff math, fan-in logic, config parsing                                                                                                    | Every push              |
-| Queue contract       | Vitest + Testcontainers (Postgres, Redis)                          | Enqueue and claim; priority order; delayed `run_at`; retry then `dead`; idempotency key drops duplicates; no job claimed twice with 50 concurrent consumers                         | Every push              |
+| Queue contract       | Vitest + Testcontainers (Postgres, Redis)                          | Enqueue and claim; FIFO by `id`; delayed `run_at`; retry then `dead`; idempotency key drops duplicates; no job claimed twice with 50 concurrent consumers                           | Every push              |
 | API                  | Fastify `inject`                                                   | Validation, status codes, presigned URL shape                                                                                                                                       | Every push              |
 | Pipeline integration | Vitest + Testcontainers (Postgres, Redis, SeaweedFS) + real ffmpeg | Upload a 3-second sample video, it reaches `ready` with 3 renditions and a thumbnail                                                                                                | Every push              |
 | Failure              | Docker Compose, on `main` or manual                                | `kill -9` a worker mid-transcode: the job finishes exactly once on another worker. SIGTERM: in-flight job completes or is released. Restart Redis and Postgres mid-run: no job lost | Pushes to main + manual |
