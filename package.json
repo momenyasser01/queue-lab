@@ -12,6 +12,7 @@
     "build": "tsc",
     "start:api": "node dist/api/server.js",
     "start:worker": "node dist/worker/main.js",
+    "db:migrate": "tsx src/db/migrate-main.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "format": "prettier --write .",
@@ -19,6 +20,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@testcontainers/postgresql": "^12.2.2",
     "@types/node": "^26.6.6",
     "@types/pg": "^8.23.1",
     "eslint": "^10.15.0",

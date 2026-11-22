@@ -14,12 +14,15 @@ Node.js 24, TypeScript (functional style, no classes), Fastify, `pg`, BullMQ, Vi
 pnpm install
 cp .env.example .env
 docker compose -f infra/compose.yaml --profile core up -d
+pnpm db:migrate   # apply src/db/migrations/*.sql
 pnpm dev:api      # or: pnpm dev:worker
 ```
 
 ## Scripts
 
-`pnpm build` · `pnpm typecheck` · `pnpm lint` · `pnpm test` · `pnpm format`
+`pnpm build` · `pnpm typecheck` · `pnpm lint` · `pnpm test` · `pnpm format` · `pnpm db:migrate`
+
+`pnpm test` needs Docker running: the database tests start a throwaway Postgres with Testcontainers.
 
 ## Conventions
 
