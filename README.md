@@ -13,10 +13,17 @@ Node.js 24, TypeScript (functional style, no classes), Fastify, `pg`, BullMQ, Vi
 ```bash
 pnpm install
 cp .env.example .env
-docker compose -f infra/compose.yaml --profile core up -d
+pnpm infra:up     # Postgres + Redis from infra/compose.yaml, configured by .env
 pnpm db:migrate   # apply src/db/migrations/*.sql
 pnpm dev:api      # or: pnpm dev:worker
 ```
+
+## Configuration
+
+- **One file:** the repo-root `.env` configures both the app (read with `dotenv`) and Compose (`pnpm infra:up` passes `--env-file .env`). Keep `DATABASE_URL` in step with the `POSTGRES_*` values above it.
+- **Postgres settings apply once:** `POSTGRES_USER`, `POSTGRES_PASSWORD` and `POSTGRES_DB` are read only when the `pgdata` volume is first created. To change them later, run `pnpm infra:down`, then `docker volume rm queue-lab_pgdata` (this deletes the local data), then `pnpm infra:up`.
+- **Port already in use:** if another Postgres listens on 5432 (for example a Windows service), set `POSTGRES_PORT=5433` and use `5433` in `DATABASE_URL`. If you skip this, `localhost:5432` may reach the other server and fail with `password authentication failed`.
+- **Images:** `.env` is excluded by `.dockerignore`; containers get their settings from Compose when they start. The credentials here are throwaway local values. Real secrets would use Compose `secrets:` (for example `POSTGRES_PASSWORD_FILE`) instead of plain environment variables.
 
 ## Scripts
 

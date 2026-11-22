@@ -12,6 +12,8 @@
     "build": "tsc",
     "start:api": "node dist/api/server.js",
     "start:worker": "node dist/worker/main.js",
+    "infra:up": "docker compose --env-file .env -f infra/compose.yaml --profile core up -d --wait",
+    "infra:down": "docker compose --env-file .env -f infra/compose.yaml --profile core down",
     "db:migrate": "tsx src/db/migrate-main.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",

@@ -351,6 +351,8 @@ Two Docker details make this work. Docker sends SIGKILL after `stop_grace_period
 
 One `compose.yaml` with three profiles: `core` (the platform), `obs` (monitoring) and `bench` (load generator). `docker compose --profile core --profile obs up --scale worker=3` starts a full run.
 
+**Configuration.** Images carry no configuration: `.env` is in `.dockerignore`, and every setting reaches a container through Compose `environment:` when it starts. Compose reads the values from the repo-root `.env` (`--env-file .env`), the same file the app reads locally. Containers build their connection string from the same variables, with the service name as the host: `DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}` (not `localhost`, which inside a container is the container itself).
+
 | Service                                     | Profile | Image                                      | Replicas      | Host port | Notes                                                                     |
 | ------------------------------------------- | ------- | ------------------------------------------ | ------------- | --------- | ------------------------------------------------------------------------- |
 | api                                         | core    | built from `Dockerfile`, command `api`     | 1             | 3000      | Waits for postgres, redis, seaweedfs to be healthy                        |
