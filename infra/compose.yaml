@@ -12,6 +12,9 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-queuelab}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-queuelab}
       POSTGRES_DB: ${POSTGRES_DB:-queuelab}
+      # Client defaults, so `pnpm db:psql` (psql inside the container) needs no flags.
+      PGUSER: ${POSTGRES_USER:-queuelab}
+      PGDATABASE: ${POSTGRES_DB:-queuelab}
     ports:
       - '${POSTGRES_PORT:-5432}:5432'
     volumes:
